@@ -24,9 +24,8 @@ const unsigned int MIN_MSPEED = 120;
 const int ROTATE_INCR = 5;
 const int ROTATE_TIME = 5000;
 
-#define ANGLE_TO_DECIMAL(ANGLE) ((float) ((ANGLE) - (MIN_SANGLE)) / (float) ((MAX_SANGLE) - (MIN_SANGLE)))
-
-#define DECIMAL_TO_ANGLE(DECIMAL) ((float) (DECIMAL) * (float) ((MAX_SANGLE) - (MIN_SANGLE)) + (MIN_SANGLE))
+#define ANGLE_TO_PROCENT(ANGLE) ((float) ((ANGLE) - (MIN_SANGLE)) / (float) ((MAX_SANGLE) - (MIN_SANGLE)) * 100)
+#define PROCENT_TO_ANGLE(PROCENT) (((float) (PROCENT) / 100) * (float) ((MAX_SANGLE) - (MIN_SANGLE)) + (MIN_SANGLE))
 
 WiFiUDP ntpUDP;
 
@@ -45,22 +44,15 @@ EspMQTTClient client(
 );
 
 DynamicJsonDocument commandJson(300);
+DynamicJsonDocument messageJson(300);
 DynamicJsonDocument statusJson(300);
-DynamicJsonDocument actionJson(300);
-
-char driveDir[64];
-int driveSpeed = 0;
 
 char rotateDir[64];
 int rotateSpeed = 0;
+int driveSpeed = 0;
 
-double motorValue = 0;
-double servoValue = 0;
-
-char inputType[64];
-
+char messageString[256];
 char statusString[256];
-char actionString[256];
 
 char buffer[1024];
 
@@ -68,60 +60,48 @@ void setup()
 {
   Serial.begin(BAUD_VALUE);
 
-  if(!wifi_setup())
+  if(!wifi_connect(WIFI_SSID, WIFI_PASSWORD))
   {
-    Serial.println("ERROR: WIFI setup");
+    Serial.println("ERROR: WIFI connect");
     exit(1);
   }
-  else Serial.println("SUCCESS: WIFI setup");
-  
-  if(!time_client_setup())
-  {
-    Serial.println("ERROR: Time client setup");
-    exit(2);
-  }
-  else Serial.println("SUCCESS: Time client setup");
+  else Serial.println("SUCCESS: WIFI connect");
+
+  timeClient.begin();
   
   if(!motor_servo_setup())
   {
     Serial.println("ERROR: Motor and servo setup");
-    exit(3);
+    exit(2);
   }
   else Serial.println("SUCCESS: Motor and servo setup");
   
-  if(!mqtt_client_setup())
+  if(!mqtt_setup())
   {
-    Serial.println("ERROR: MQTT client setup");
-    exit(4);
+    Serial.println("ERROR: MQTT setup");
+    exit(3);
   }
-  else Serial.println("SUCCESS: MQTT client setup");
+  else Serial.println("SUCCESS: MQTT setup");
 }
 
-bool wifi_setup()
-{
-  if (wifi_ssid_password_connect(WIFI_SSID, WIFI_PASSWORD)) return true;
-  
-  return false;
-}
-
-bool time_client_setup()
-{
-  timeClient.begin();
-
-  return true;
-}
-
-bool motor_servo_setup()
+/*
+ * RETURN
+ * bool result | Successful setup
+ */
+bool motor_servo_setup(void)
 {
   pinMode(MOTOR_DPIN, OUTPUT);
   pinMode(MOTOR_SPIN, OUTPUT);
 
-  servo.attach(SERVO_PIN);
+  if(servo.attach(SERVO_PIN) == 0) return false;
 
   return true;
 }
 
-bool mqtt_client_setup()
+/*
+ *
+ */
+bool mqtt_setup(void)
 {
   sprintf(buffer, "Connecting to broker: (%s:%d)", client.getMqttServerIp(), client.getMqttServerPort());
   Serial.println(buffer);
@@ -130,14 +110,22 @@ bool mqtt_client_setup()
   client.enableHTTPWebUpdater();
   client.enableOTA();
 
-  alloc_status_string("Currently offline");
-  client.enableLastWillMessage("hampus/arduino-status", statusString);
+  char* message = message_json_create("offline");
+  client.enableLastWillMessage("hampus/arduino-message", message);
 
-  // return client.isConnected();
+  // return client.isConnected(); -- I don't know why this is failing?
   return true;
 }
 
-bool wifi_ssid_password_connect(const char ssid[], const char password[])
+/*
+ * PARAMS
+ * - const char ssid[]     | The WIFI SSID
+ * - const char password[] | The WIFI password
+ *
+ * RETURN
+ * bool result | It successfully connected to the WIFI
+ */
+bool wifi_connect(const char ssid[], const char password[])
 {
   WiFi.mode(WIFI_STA);
 
@@ -154,9 +142,12 @@ bool wifi_ssid_password_connect(const char ssid[], const char password[])
   return false;
 }
 
-void onConnectionEstablished()
+/*
+ * 
+ */
+void onConnectionEstablished(void)
 {
-  publish_status_message("Connected to broker");
+  message_publish("Connected to broker");
 
   client.subscribe("hampus/command", [](const String & payload)
   {
@@ -164,169 +155,158 @@ void onConnectionEstablished()
 
     if (error)
     {
-      Serial.print("Json Failed: ");
-      Serial.println(error.f_str());
+      sprintf(buffer, "Json failed: (%s)", error.f_str());
+      Serial.println(buffer);
 
-      publish_status_message("Error parsing JSON");
-
-      return;
+      message_publish("Error parsing JSON");
     }
-
-    publish_action_values();
-
-    const char* jsonInputType = commandJson["type"];
-    strcpy(inputType, jsonInputType);
-
-    if (!strcmp(inputType, "buttons") || !strcmp(inputType, "keypress"))
+    else 
     {
-      update_drive_rotate();
+      command_json_parse();
+
+      // =========================
+      Serial.println(rotateDir);
+      Serial.println(rotateSpeed);
+      Serial.println(driveSpeed);
+      // =========================
+
+      status_publish();
     }
-    else if (!strcmp(inputType, "joystick"))
-    {
-      motorValue = commandJson["values"]["motorValue"];
-      servoValue = commandJson["values"]["servoValue"];
-    }
-    else publish_status_message("Unknown input type");
   });
 }
 
-void update_drive_rotate()
+/*
+ *
+ */
+void command_json_parse(void)
 {
-  const char* jsonDriveDir = commandJson["values"]["driveDir"];
-  const char* jsonRotateDir = commandJson["values"]["rotateDir"];
+  // rotate dir
+  const char* jsonRotateDir = commandJson["rotateDir"];
 
-  if (jsonDriveDir != NULL)
-  {
-    strcpy(driveDir, jsonDriveDir);
-    driveSpeed = commandJson["values"]["driveSpeed"];
-  }
-  if (jsonRotateDir != NULL)
-  {
-    strcpy(rotateDir, jsonRotateDir);
-    rotateSpeed = commandJson["values"]["rotateSpeed"];
-  }
+  if(jsonRotateDir != NULL) strcpy(rotateDir, jsonRotateDir);
+
+  // drive speed
+  int jsonDriveSpeed = commandJson["driveSpeed"] | -1;
+
+  if(jsonDriveSpeed != -1) driveSpeed = jsonDriveSpeed;
+
+  // rotate speed
+  int jsonRotateSpeed = commandJson["rotateSpeed"] | -1;
+
+  if(jsonRotateSpeed != -1) rotateSpeed = jsonRotateSpeed;
 }
 
-void publish_action_values()
+/*
+ * Publish the values of
+ * - angle | The angle of the servo
+ * - speed | The speed of the motor
+ * - time  | Current Epoch Time
+ */
+void status_publish(void)
 {
-  actionJson.clear();
+  statusJson.clear();
   timeClient.update();
 
-  actionJson["servoAngle"] = servo.read();
-  actionJson["motorValue"] = digitalRead(MOTOR_DPIN);
-  actionJson["motorSpeed"] = analogRead(MOTOR_SPIN);
-  actionJson["time"] = timeClient.getEpochTime();
-
-  serializeJson(actionJson, actionString);
-
-  client.publish("hampus/arduino-action", actionString);
-}
-
-void alloc_status_string(const char message[])
-{
-  statusJson.clear(); 
-  timeClient.update();
-
-  statusJson["status"] = message;
+  statusJson["angle"] = servo.read();
+  statusJson["speed"] = analogRead(MOTOR_SPIN);
   statusJson["time"] = timeClient.getEpochTime();
 
   serializeJson(statusJson, statusString);
-}
-
-void publish_status_message(const char message[])
-{
-  alloc_status_string(message);
 
   client.publish("hampus/arduino-status", statusString);
 }
 
+/*
+ * PARAMS
+ * - const char message[] | The message to publish
+ *
+ * RETURN
+ * - char* string | A pointer to the message string
+ */
+char* message_json_create(const char message[])
+{
+  messageJson.clear(); 
+  timeClient.update();
+
+  messageJson["message"] = message;
+  messageJson["time"] = timeClient.getEpochTime();
+
+  serializeJson(messageJson, messageString);
+
+  return messageString;
+}
+
+/*
+ * PARAMS
+ * - const char message[] | The message to publish
+ */
+void message_publish(const char message[])
+{
+  char* messageString = message_json_create(message);
+
+  client.publish("hampus/arduino-message", messageString);
+}
+
 void loop()
 {
+  // Refresh the values sent from the website
   client.loop();
 
-  if (!strcmp(inputType, "buttons") || !strcmp(inputType, "keypress"))
-  {
-    buttons_keypress_handler();
-  }
-  if (!strcmp(inputType, "joystick"))
-  {
-    joystick_handler();
-  }
-}
-
-void joystick_handler()
-{
-  motor_rotate(MOTOR_DPIN, MOTOR_SPIN, (int) motorValue);
-
-  servo_negative_procent_rotate((int) servoValue);
-}
-
-void buttons_keypress_handler()
-{
-  if (driveDir != NULL && driveSpeed >= 0)
-  {
-    drive_action_parse(driveDir, driveSpeed);
-  }
-  if (rotateDir != NULL && rotateSpeed >= 0)
-  {
-    servo_rotate_action_parse(rotateDir, rotateSpeed);
-  }  
-}
-
-void drive_action_parse(const char driveDir[], int driveSpeed)
-{
-  if (!strcmp(driveDir, "north"))
+  if(driveSpeed >= 0)
   {
     motor_rotate(MOTOR_DPIN, MOTOR_SPIN, driveSpeed);
   }
-  else if (!strcmp(driveDir, "south"))
+  if(rotateDir != NULL && rotateSpeed >= 0)
   {
-    motor_rotate(MOTOR_DPIN, MOTOR_SPIN, -driveSpeed);
-  }
-  else if (!strcmp(driveDir, "none"))
-  {
-    motor_rotate(MOTOR_DPIN, MOTOR_SPIN, 0);
+    // Maybe change rotateDir to rotateBool and just call servo_rotate
+    servo_rotate_parse(rotateDir, rotateSpeed);
   }
 }
 
-void servo_rotate_action_parse(const char rotateDir[], int rotateSpeed)
+/*
+ * PARAMS
+ * - const char dir[] |
+ * - int speed        |
+ */
+void servo_rotate_parse(const char dir[], int speed)
 {
-  if (!strcmp(rotateDir, "west"))
+  if(!strcmp(dir, "west"))
   {
-    servo_rotate_step_action(rotateSpeed, true);
+    servo_rotate(speed, true);
   }
-  else if (!strcmp(rotateDir, "east"))
+  else if(!strcmp(dir, "east"))
   {
-    servo_rotate_step_action(rotateSpeed, false);
+    servo_rotate(speed, false);
   }
 }
-
-void servo_rotate_step_action(int speedProcent, bool directBool)
+/*
+ * PARAMS
+ * - int speed |
+ * - int dir   |
+ */
+void servo_rotate(int speed, bool dir)
 {
-  float readDecimal = ANGLE_TO_DECIMAL(servo.read());
+  // The procent to start rotating from
+  int start = ANGLE_TO_PROCENT(servo.read());
 
-  int readProcent = readDecimal * 100;
+  // The procent to rotate to
+  int procent = dir ? (start - ROTATE_INCR) : (start + ROTATE_INCR);
 
-  int startProcent = directBool ? (100 - readProcent) : readProcent;
+  // Rotate to the corresponding angle
+  servo.write(PROCENT_TO_ANGLE(procent));
 
-  int stepDelay = servo_rotate_step_delay(speedProcent);
-
-  int index = startProcent + ROTATE_INCR;
-
-  if (index >= 100) return;
-
-  int rotateProcent = directBool ? (100 - index) : index;
-
-  servo_procent_rotate(rotateProcent);
-
-  delay(stepDelay);
+  // Wait for some time depending on the rotate speed
+  delay(servo_delay(speed));
 }
-
-float servo_rotate_step_delay(int speedProcent)
+/*
+ * PARAMS
+ * - int procent |
+ */
+float servo_delay(int procent)
 {
-  if (speedProcent < 0 || speedProcent > 100) return 0;
-
-  float decimal = (float) (100 - speedProcent) / 100;
+  if(procent < 0 || procent > 100) return 0;
+  
+  float decimal = (float) (100 - procent) / 100;
 
   float incrDecimal = (float) ROTATE_INCR / 100;
 
@@ -335,57 +315,19 @@ float servo_rotate_step_delay(int speedProcent)
   return totalTime * incrDecimal;
 }
 
-bool servo_procent_rotate(int procent)
+#define PROCENT_TO_VALUE(PROCENT) ((float) PROCENT / 100 * (MAX_MSPEED - MIN_MSPEED) + MIN_MSPEED)
+
+/*
+ * PARAMS
+ * - dpin    |
+ * - spin    |
+ * - procent |
+ */
+void motor_rotate(uint8_t dpin, uint8_t spin, int procent)
 {
-  if (procent < 0 || procent > 100) return false;
+  int value = (procent == 0) ? 0 : PROCENT_TO_VALUE(procent);
 
-  float decimal = (float) procent / 100;
+  digitalWrite(dpin, HIGH);
 
-  int servoAngle = DECIMAL_TO_ANGLE(decimal);
-
-  return servo_angle_rotate(servoAngle);
-}
-
-bool servo_negative_procent_rotate(int negativeProcent)
-{
-  if(negativeProcent < -100 || negativeProcent > 100) return false;
-
-  float decimal = ((float) (negativeProcent + 100) / 200);
-
-  int servoAngle = DECIMAL_TO_ANGLE(decimal);
-
-  return servo_angle_rotate(servoAngle);
-}
-
-bool servo_angle_rotate(int servoAngle)
-{
-  if(servoAngle < 0 || servoAngle > 100) return false;
-
-  servo.write(servoAngle);
-
-  return true;
-}
-
-bool motor_rotate(uint8_t motorDPin, uint8_t motorSPin, int procent)
-{
-  int motorDir = ((procent > 0 ) ? HIGH : LOW);
-  int speedProcent = abs(procent);
-
-  if (speedProcent < 0 || speedProcent > 100) return false;
-
-  if (speedProcent == 0)
-  {
-    analogWrite(motorSPin, 0);
-    return true;
-  }
-
-  float speedDecimal = (float) speedProcent / 100;
-
-  int motorSpeed = (speedDecimal * (MAX_MSPEED - MIN_MSPEED) + MIN_MSPEED);
-
-  digitalWrite(motorDPin, motorDir);
-
-  analogWrite(motorSPin, motorSpeed);
-
-  return true;
+  analogWrite(spin, value);
 }
