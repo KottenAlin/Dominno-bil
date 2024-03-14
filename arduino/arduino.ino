@@ -1,46 +1,5 @@
 #include "arduino.h"
 
-const unsigned long BAUD_VALUE = 9600;
-const unsigned int LOOP_DELAY  = 1000;
-
-// WIFI constants
-#define WIFI_SSID     "ABBgym_2.4"
-#define WIFI_PASSWORD "mittwifiarsabra"
-
-const unsigned int CONNECT_TRIES = 32;
-const unsigned int WIFI_DELAY    = 1000;
-
-// MQTT constants
-#define MQTT_ADDRESS "10.22.4.26"
-#define MQTT_PORT    1883
-
-// Servo constants
-const int SERVO_PIN = D7;
-
-const unsigned int SERVO_ANGLE_MAX = 180;
-const unsigned int SERVO_ANGLE_MIN = 0;
-
-// Motor constants
-const unsigned int MOTOR_SPEED_MAX = 400;
-const unsigned int MOTOR_SPEED_MIN = 120;
-
-// Drive constants
-const uint8_t DRIVE_DPIN = D3;
-const uint8_t DRIVE_SPIN = D1;
-
-const unsigned int DRIVE_DELAY_MAX = 900;
-const unsigned int DRIVE_DELAY_MIN = 800;
-
-// Domino constants
-const uint8_t DOMINO_DPIN = D4;
-const uint8_t DOMINO_SPIN = D2;
-
-const unsigned int DOMINO_DELAY        = 1000;
-const unsigned int DOMINO_WAIT_DELAY   = 1000;
-
-const unsigned int DOMINO_PLACE_SPEED  = 50;
-const unsigned int DOMINO_RETURN_SPEED = 100;
-
 WiFiUDP ntpUDP;
 
 NTPClient timeClient(ntpUDP, "pool.ntp.org");
@@ -287,7 +246,7 @@ void message_publish(const char* message)
 void loop()
 {
   // Refresh the values sent from the website
-  client.loop();
+  if(client.isConnected()) client.loop();
 
   if(driveSpeed >= 0)
   {
@@ -325,6 +284,9 @@ void domino_place(void)
   domino_motor_rotate(-DOMINO_RETURN_SPEED);
 
   delay(DOMINO_SPEED_DELAY(DOMINO_RETURN_SPEED));
+
+  // 4. Stop the rotation when driving
+  domino_motor_rotate(0);
 }
 
 void domino_motor_rotate(int procent)
@@ -376,12 +338,20 @@ void wheels_turn(void)
  * - uint8_t dpin | The motor dpin
  * - uint8_t spin | The motor spin
  * - int procent  | The procent of the speed which to rotate the motor
+ *
+ * RETURN (int status)
+ * - 0 | Success!
+ * - 1 | The inputted procent is not valid
  */
-void motor_rotate(uint8_t dpin, uint8_t spin, int procent)
+int motor_rotate(uint8_t dpin, uint8_t spin, int procent)
 {
-  int value = (procent == 0) ? 0 : PROCENT_MOTOR_SPEED(procent);
+  if(procent < -100 || procent > 100) return 1;
 
-  digitalWrite(dpin, HIGH);
+  digitalWrite(dpin, (procent > 0 ) ? HIGH : LOW);
+
+  int value = (procent == 0) ? 0 : PROCENT_MOTOR_SPEED(abs(procent));
 
   analogWrite(spin, value);
+
+  return 0;
 }
