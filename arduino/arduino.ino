@@ -48,6 +48,7 @@ DynamicJsonDocument messageJson(300);
 DynamicJsonDocument statusJson(300);
 
 char rotateDir[64];
+
 int rotateSpeed = 0;
 int driveSpeed = 0;
 
