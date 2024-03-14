@@ -1,31 +1,45 @@
 #include "arduino.h"
 
 const unsigned long BAUD_VALUE = 9600;
+const unsigned int LOOP_DELAY  = 1000;
 
-const char WIFI_SSID[] = "ABBgym_2.4";
-const char WIFI_PASSWORD[] = "mittwifiarsabra";
+// WIFI constants
+#define WIFI_SSID     "ABBgym_2.4"
+#define WIFI_PASSWORD "mittwifiarsabra"
 
 const unsigned int CONNECT_TRIES = 32;
-const unsigned int WIFI_DELAY = 1000;
+const unsigned int WIFI_DELAY    = 1000;
 
-const unsigned int LOOP_DELAY = 1000;
+// MQTT constants
+#define MQTT_ADDRESS "10.22.4.26"
+#define MQTT_PORT    1883
 
+// Servo constants
 const int SERVO_PIN = D7;
 
-const unsigned int MAX_SANGLE = 180;
-const unsigned int MIN_SANGLE = 0;
+const unsigned int SERVO_ANGLE_MAX = 180;
+const unsigned int SERVO_ANGLE_MIN = 0;
 
-const uint8_t MOTOR_DPIN = D3;
-const uint8_t MOTOR_SPIN = D1;
+// Motor constants
+const unsigned int MOTOR_SPEED_MAX = 400;
+const unsigned int MOTOR_SPEED_MIN = 120;
 
-const unsigned int MAX_MSPEED = 400;
-const unsigned int MIN_MSPEED = 120;
+// Drive constants
+const uint8_t DRIVE_DPIN = D3;
+const uint8_t DRIVE_SPIN = D1;
 
-const int ROTATE_INCR = 5;
-const int ROTATE_TIME = 5000;
+const unsigned int DRIVE_DELAY_MAX = 900;
+const unsigned int DRIVE_DELAY_MIN = 800;
 
-#define ANGLE_TO_PROCENT(ANGLE) ((float) ((ANGLE) - (MIN_SANGLE)) / (float) ((MAX_SANGLE) - (MIN_SANGLE)) * 100)
-#define PROCENT_TO_ANGLE(PROCENT) (((float) (PROCENT) / 100) * (float) ((MAX_SANGLE) - (MIN_SANGLE)) + (MIN_SANGLE))
+// Domino constants
+const uint8_t DOMINO_DPIN = D4;
+const uint8_t DOMINO_SPIN = D2;
+
+const unsigned int DOMINO_DELAY        = 1000;
+const unsigned int DOMINO_WAIT_DELAY   = 1000;
+
+const unsigned int DOMINO_PLACE_SPEED  = 50;
+const unsigned int DOMINO_RETURN_SPEED = 100;
 
 WiFiUDP ntpUDP;
 
@@ -34,26 +48,25 @@ NTPClient timeClient(ntpUDP, "pool.ntp.org");
 Servo servo;
 
 EspMQTTClient client(
-  "ABBgym_2.4",      // WIFI SSID
-  "mittwifiarsabra", // WIFI Password
-  "10.22.4.26",      // MQTT Broker server ip
-  "",                // Can be omitted if not needed
-  "",                // Can be omitted if not needed
-  "domino-car",      // Client name that uniquely identify your device
-  1883               // MQTT Broker server port
+  WIFI_SSID,     // WIFI SSID
+  WIFI_PASSWORD, // WIFI Password
+  MQTT_ADDRESS,  // MQTT Broker server ip
+  "",            // Can be omitted if not needed
+  "",            // Can be omitted if not needed
+  "domino-car",  // Client name that uniquely identify your device
+  MQTT_PORT      // MQTT Broker server port
 );
 
 DynamicJsonDocument commandJson(300);
 DynamicJsonDocument messageJson(300);
 DynamicJsonDocument statusJson(300);
 
-char rotateDir[64];
+int turnProcent = 50;  // The procent rotation of the drive (0 - 100)
+int driveSpeed   = 100; // The speed which to drive forward   (0 - 100)
+int dominoSpace  = 100; // The space between domino bricks    (0 - 100)
 
-int rotateSpeed = 0;
-int driveSpeed = 0;
-
-char messageString[256];
-char statusString[256];
+char messageJsonString[256];
+char statusJsonString[256];
 
 char buffer[1024];
 
@@ -61,7 +74,7 @@ void setup()
 {
   Serial.begin(BAUD_VALUE);
 
-  if(!wifi_connect(WIFI_SSID, WIFI_PASSWORD))
+  if(wifi_connect(WIFI_SSID, WIFI_PASSWORD) != 0)
   {
     Serial.println("ERROR: WIFI connect");
     exit(1);
@@ -70,14 +83,14 @@ void setup()
 
   timeClient.begin();
   
-  if(!motor_servo_setup())
+  if(motor_servo_setup() != 0)
   {
     Serial.println("ERROR: Motor and servo setup");
     exit(2);
   }
   else Serial.println("SUCCESS: Motor and servo setup");
   
-  if(!mqtt_setup())
+  if(mqtt_setup() != 0)
   {
     Serial.println("ERROR: MQTT setup");
     exit(3);
@@ -86,23 +99,26 @@ void setup()
 }
 
 /*
- * RETURN
- * bool result | Successful setup
+ * RETURN (int status)
+ * - 0 | Success!
+ * - 1 | Failed to attack SERVO_PIN
  */
-bool motor_servo_setup(void)
+int motor_servo_setup(void)
 {
-  pinMode(MOTOR_DPIN, OUTPUT);
-  pinMode(MOTOR_SPIN, OUTPUT);
+  pinMode(DRIVE_DPIN, OUTPUT);
+  pinMode(DRIVE_SPIN, OUTPUT);
 
-  if(servo.attach(SERVO_PIN) == 0) return false;
+  pinMode(DOMINO_DPIN, OUTPUT);
+  pinMode(DOMINO_SPIN, OUTPUT);
 
-  return true;
+  return (servo.attach(SERVO_PIN) == 0) ? 1 : 0;
 }
 
 /*
- *
+ * RETURN (int status)
+ * - 0 | Success!
  */
-bool mqtt_setup(void)
+int mqtt_setup(void)
 {
   sprintf(buffer, "Connecting to broker: (%s:%d)", client.getMqttServerIp(), client.getMqttServerPort());
   Serial.println(buffer);
@@ -115,36 +131,41 @@ bool mqtt_setup(void)
   client.enableLastWillMessage("hampus/arduino-message", message);
 
   // return client.isConnected(); -- I don't know why this is failing?
-  return true;
+  return 0;
 }
 
 /*
- * PARAMS
- * - const char ssid[]     | The WIFI SSID
- * - const char password[] | The WIFI password
+ * Connect to a WIFI using SSID and password
  *
- * RETURN
- * bool result | It successfully connected to the WIFI
+ * PARAMS
+ * - const char* ssid     | The WIFI SSID
+ * - const char* password | The WIFI password
+ *
+ * RETURN (int status)
+ * - 0 | Success!
+ * - 1 | WIFI status is WL_NO_SHIELD
+ * - 2 | Failed to connect to WIFI
  */
-bool wifi_connect(const char ssid[], const char password[])
+int wifi_connect(const char* ssid, const char* password)
 {
   WiFi.mode(WIFI_STA);
 
-  if (WiFi.status() == WL_NO_SHIELD) return false;
+  if (WiFi.status() == WL_NO_SHIELD) return 1;
 
   WiFi.begin(ssid, password);
 
   for (int index = 0; index <= CONNECT_TRIES; index += 1)
   {
-    if (WiFi.status() == WL_CONNECTED) return true;
+    if (WiFi.status() == WL_CONNECTED) return 0;
 
     delay(WIFI_DELAY);
   }
-  return false;
+  return 1;
 }
 
 /*
- * 
+ * When connection to the broker is established,
+ * subscribe to the hampus/command topic
  */
 void onConnectionEstablished(void)
 {
@@ -166,9 +187,9 @@ void onConnectionEstablished(void)
       command_json_parse();
 
       // =========================
-      Serial.println(rotateDir);
-      Serial.println(rotateSpeed);
+      Serial.println(turnProcent);
       Serial.println(driveSpeed);
+      Serial.println(dominoSpace);
       // =========================
 
       status_publish();
@@ -177,54 +198,63 @@ void onConnectionEstablished(void)
 }
 
 /*
+ * Parse the command json string, to update the driving values
  *
+ * If the json object does not contain a specific value (ex driveSpeed),
+ * do not update the value, continue with the existing value
  */
 void command_json_parse(void)
 {
-  // rotate dir
-  const char* jsonRotateDir = commandJson["rotateDir"];
+  // rotate amount
+  int jsonTurnProcent = commandJson["turnProcent"] | -1;
 
-  if(jsonRotateDir != NULL) strcpy(rotateDir, jsonRotateDir);
+  if(jsonTurnProcent != -1) turnProcent = jsonTurnProcent;
 
   // drive speed
   int jsonDriveSpeed = commandJson["driveSpeed"] | -1;
 
   if(jsonDriveSpeed != -1) driveSpeed = jsonDriveSpeed;
 
-  // rotate speed
-  int jsonRotateSpeed = commandJson["rotateSpeed"] | -1;
+  // domino space
+  int jsonDominoSpace = commandJson["dominoSpace"] | -1;
 
-  if(jsonRotateSpeed != -1) rotateSpeed = jsonRotateSpeed;
+  if(jsonDominoSpace != -1) dominoSpace = jsonDominoSpace;
 }
+
+#define SERVO_ANGLE_PROCENT(ANGLE) ((float) ((ANGLE) - (SERVO_ANGLE_MIN)) / (float) ((SERVO_ANGLE_MAX) - (SERVO_ANGLE_MIN)) * 100)
+#define MOTOR_SPEED_PROCENT(SPEED) ((float) ((SPEED) - (MOTOR_SPEED_MIN)) / (float) ((MOTOR_SPEED_MAX) - (MOTOR_SPEED_MIN)) * 100)
 
 /*
  * Publish the values of
  * - angle | The angle of the servo
  * - speed | The speed of the motor
- * - time  | Current Epoch Time
+ * - time  | The current epoch time
  */
 void status_publish(void)
 {
   statusJson.clear();
   timeClient.update();
 
-  statusJson["angle"] = servo.read();
-  statusJson["speed"] = analogRead(MOTOR_SPIN);
+  statusJson["angle"] = SERVO_ANGLE_PROCENT(servo.read());
+  statusJson["speed"] = MOTOR_SPEED_PROCENT(analogRead(DRIVE_SPIN));
   statusJson["time"] = timeClient.getEpochTime();
 
-  serializeJson(statusJson, statusString);
+  serializeJson(statusJson, statusJsonString);
 
-  client.publish("hampus/arduino-status", statusString);
+  client.publish("hampus/arduino-status", statusJsonString);
 }
 
 /*
+ * Create the message json object, 
+ * containing the inputted message and the current time
+ *
  * PARAMS
- * - const char message[] | The message to publish
+ * - const char* message | The message to publish
  *
  * RETURN
  * - char* string | A pointer to the message string
  */
-char* message_json_create(const char message[])
+char* message_json_create(const char* message)
 {
   messageJson.clear(); 
   timeClient.update();
@@ -232,22 +262,28 @@ char* message_json_create(const char message[])
   messageJson["message"] = message;
   messageJson["time"] = timeClient.getEpochTime();
 
-  serializeJson(messageJson, messageString);
+  serializeJson(messageJson, messageJsonString);
 
-  return messageString;
+  return messageJsonString;
 }
 
 /*
+ * Publish the inputted message to the hampus/arduino-message topic,
+ * after first creating the message json object from the message string
+ *
  * PARAMS
- * - const char message[] | The message to publish
+ * - const char* message | The message to publish
  */
-void message_publish(const char message[])
+void message_publish(const char* message)
 {
-  char* messageString = message_json_create(message);
+  char* messageJsonString = message_json_create(message);
 
-  client.publish("hampus/arduino-message", messageString);
+  client.publish("hampus/arduino-message", messageJsonString);
 }
 
+/*
+ * The loop is running every tick
+ */
 void loop()
 {
   // Refresh the values sent from the website
@@ -255,78 +291,95 @@ void loop()
 
   if(driveSpeed >= 0)
   {
-    motor_rotate(MOTOR_DPIN, MOTOR_SPIN, driveSpeed);
+    // 1. Place a domino brick on the floor
+    domino_place();
+
+    // 2. Drive forward leaving the domino standing
+    wheels_drive();
   }
-  if(rotateDir != NULL && rotateSpeed >= 0)
+  if(turnProcent >= 0)
   {
-    // Maybe change rotateDir to rotateBool and just call servo_rotate
-    servo_rotate_parse(rotateDir, rotateSpeed);
+    wheels_turn();
   }
 }
 
+// SPEED is in procent
+#define DOMINO_SPEED_DELAY(SPEED) (100 / (SPEED) * DOMINO_DELAY)
+
 /*
- * PARAMS
- * - const char dir[] |
- * - int speed        |
+ * Place down a domino brick on the floor
  */
-void servo_rotate_parse(const char dir[], int speed)
+void domino_place(void)
 {
-  if(!strcmp(dir, "west"))
-  {
-    servo_rotate(speed, true);
-  }
-  else if(!strcmp(dir, "east"))
-  {
-    servo_rotate(speed, false);
-  }
-}
-/*
- * PARAMS
- * - int speed |
- * - int dir   |
- */
-void servo_rotate(int speed, bool dir)
-{
-  // The procent to start rotating from
-  int start = ANGLE_TO_PROCENT(servo.read());
+  // 1. Close the door and rotate the feeder
+  domino_motor_rotate(DOMINO_PLACE_SPEED);
 
-  // The procent to rotate to
-  int procent = dir ? (start - ROTATE_INCR) : (start + ROTATE_INCR);
+  delay(DOMINO_SPEED_DELAY(DOMINO_PLACE_SPEED));
 
-  // Rotate to the corresponding angle
-  servo.write(PROCENT_TO_ANGLE(procent));
+  // 2. Stop the rotation and let domino stay still
+  domino_motor_rotate(0);
 
-  // Wait for some time depending on the rotate speed
-  delay(servo_delay(speed));
-}
-/*
- * PARAMS
- * - int procent |
- */
-float servo_delay(int procent)
-{
-  if(procent < 0 || procent > 100) return 0;
-  
-  float decimal = (float) (100 - procent) / 100;
+  delay(DOMINO_WAIT_DELAY);
 
-  float incrDecimal = (float) ROTATE_INCR / 100;
+  // 3. Open the door and return the feeder
+  domino_motor_rotate(-DOMINO_RETURN_SPEED);
 
-  float totalTime = (float) ROTATE_TIME * decimal;
-
-  return totalTime * incrDecimal;
+  delay(DOMINO_SPEED_DELAY(DOMINO_RETURN_SPEED));
 }
 
-#define PROCENT_TO_VALUE(PROCENT) ((float) PROCENT / 100 * (MAX_MSPEED - MIN_MSPEED) + MIN_MSPEED)
+void domino_motor_rotate(int procent)
+{
+  motor_rotate(DOMINO_DPIN, DOMINO_SPIN, procent);
+}
+
+#define DRIVE_PROCENT_DELAY(PROCENT) (((float) (PROCENT) / 100) * (float) ((DRIVE_DELAY_MAX) - (DRIVE_DELAY_MIN)) + (DRIVE_DELAY_MIN))
 
 /*
+ *
+ */
+void wheels_drive(void)
+{
+  // 1. Start driving forward
+  drive_motor_rotate(driveSpeed);
+
+  // 2. Wait some time, depending on 
+  int driveDelay = DRIVE_PROCENT_DELAY(dominoSpace);
+
+  delay((100 / (float) driveSpeed) * driveDelay);
+
+  // 3. Stop driving any further forward
+  drive_motor_rotate(0);
+}
+
+void drive_motor_rotate(int procent)
+{
+  motor_rotate(DRIVE_DPIN, DRIVE_SPIN, procent);
+}
+
+#define PROCENT_SERVO_ANGLE(PROCENT) (((float) (PROCENT) / 100) * (float) ((SERVO_ANGLE_MAX) - (SERVO_ANGLE_MIN)) + (SERVO_ANGLE_MIN))
+
+/*
+ * 
+ */
+void wheels_turn(void)
+{
+  servo.write(PROCENT_SERVO_ANGLE(turnProcent));
+}
+
+#define PROCENT_MOTOR_SPEED(PROCENT) ((float) (PROCENT) / 100 * (float) ((MOTOR_SPEED_MAX) - (MOTOR_SPEED_MIN)) + (MOTOR_SPEED_MIN))
+
+/*
+ * Rotate the motor connected to the inputted dpin and spin,
+ * at the inputted procent of max motor speed
+ *
  * PARAMS
- * - dpin    |
- * - spin    |
- * - procent |
+ * - uint8_t dpin | The motor dpin
+ * - uint8_t spin | The motor spin
+ * - int procent  | The procent of the speed which to rotate the motor
  */
 void motor_rotate(uint8_t dpin, uint8_t spin, int procent)
 {
-  int value = (procent == 0) ? 0 : PROCENT_TO_VALUE(procent);
+  int value = (procent == 0) ? 0 : PROCENT_MOTOR_SPEED(procent);
 
   digitalWrite(dpin, HIGH);
 
